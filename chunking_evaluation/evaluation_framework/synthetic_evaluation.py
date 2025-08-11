@@ -1532,10 +1532,10 @@ class SyntheticEvaluation(BaseEvaluation):
             return False
         
         try:
-            if 'corpus_id' in df.columns:
-                df['corpus_id'] = df['corpus_id'].str.replace('\\', '/', regex=False)
             df = pd.read_csv(self.questions_csv_path)
             print(f"📊 讀取到 {len(df)} 條記錄")
+            if 'corpus_id' in df.columns:
+                df['corpus_id'] = df['corpus_id'].str.replace('\\', '/', regex=False)
             
             # 檢查必要欄位
             required_columns = ['question', 'references', 'corpus_id']
