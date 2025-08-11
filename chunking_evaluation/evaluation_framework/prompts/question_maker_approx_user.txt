@@ -1,0 +1,7 @@
+Text: {document}
+
+The following questions have already been used. Do not repeat them: {prev_questions_str}
+
+Generate a unique question in Traditional Chinese (Taiwan) about this course syllabus. The question MUST include course identification information (course name, course code, or instructor name) to distinguish it from other courses. Focus on meaningful academic content such as learning objectives, teaching methods, assessment criteria, course topics, or prerequisites rather than basic administrative details.
+
+Respond with a complete JSON object including oath, question, and references. Ensure the question is answerable solely from the provided syllabus text.
