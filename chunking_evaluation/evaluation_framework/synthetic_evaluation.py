@@ -137,26 +137,17 @@ class SyntheticEvaluation(BaseEvaluation):
 
     def _save_questions_df(self):
         """
-        修正的儲存函數，避免雙重序列化
+        修正的儲存函數，直接序列化 Python 物件
         """
-        # 創建一個副本用於儲存
         df_to_save = self.synth_questions_df.copy()
         
-        # 確保 references 欄位正確序列化
         def safe_serialize_references(refs):
-            if isinstance(refs, str):
-                # 如果已經是字串，先嘗試解析再重新序列化
-                try:
-                    parsed_refs = self._safe_json_loads(refs)
-                    return json.dumps(parsed_refs, ensure_ascii=False)
-                except:
-                    return refs
-            elif isinstance(refs, (list, dict)):
-                # 如果是物件，直接序列化
-                return json.dumps(refs, ensure_ascii=False)
-            else:
-                # 其他情況，轉為空 list
+            # 確保輸入是 list 或 dict，否則返回空列表
+            if not isinstance(refs, (list, dict)):
                 return json.dumps([], ensure_ascii=False)
+            
+            # 直接序列化為 JSON 字串
+            return json.dumps(refs, ensure_ascii=False)
         
         df_to_save['references'] = df_to_save['references'].apply(safe_serialize_references)
         df_to_save.to_csv(self.questions_csv_path, index=False)

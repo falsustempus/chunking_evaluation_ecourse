@@ -110,32 +110,19 @@ class BaseEvaluation:
     def _load_questions_df(self):
         if os.path.exists(self.questions_csv_path):
             self.questions_df = pd.read_csv(self.questions_csv_path)
-            self.questions_df['references'] = self.questions_df['references'].apply(json.loads)
-            
-            # --- 新增這一段：統一 'corpus_id' 的路徑格式 ---
-            # 取得 questions_csv_path 的父目錄
-            csv_parent_dir = Path(self.questions_csv_path).parent
-            
-            # 將每個 corpus_id 轉換為相對於 corpora_id_paths 基準目錄的相對路徑
-            def standardize_corpus_id(path):
-                # 這裡需要一個更通用的方法來處理路徑
-                # 一個簡單的方法是直接替換反斜線，但這可能不夠穩健
-                # 一個更好的方法是統一它們的開頭
-                return str(path).replace('\\', '/')
-
-            self.questions_df['corpus_id'] = self.questions_df['corpus_id'].apply(standardize_corpus_id)
-            # --- 修正結束 ---
-            
-            if self.questions_df.empty:
-                print("Warning: questions_df is empty after loading.")
         else:
             print(f"Warning: CSV file not found at {self.questions_csv_path}")
-            self.questions_df = pd.DataFrame()
+            # 创建带有必要列的空DataFrame
+            self.questions_df = pd.DataFrame(columns=['question', 'references', 'corpus_id'])
         
-        self.corpus_list = self.questions_df['corpus_id'].unique().tolist()
+        # 确保 corpus_list 安全地创建
+        if 'corpus_id' in self.questions_df.columns and len(self.questions_df) > 0:
+            self.corpus_list = self.questions_df['corpus_id'].unique().tolist()
+        else:
+            self.corpus_list = []
 
     def _get_chunks_and_metadata(self, splitter):
-        # Warning: metadata will be incorrect if a chunk is repeated since we use .find() to find the start index. 
+        # Warning: metadata will be incorrect if a chunk is repeated since we use .find() to find the start index.
         # This isn't pratically an issue for chunks over 1000 characters.
         documents = []
         metadatas = []
@@ -148,87 +135,83 @@ class BaseEvaluation:
                 try:
                     # 使用標準化的路徑進行查詢
                     corpus_path = self.corpora_id_paths[standardized_corpus_id]
+                    
+                    # Check the operating system and use UTF-8 encoding on Windows
+                    # This prevents UnicodeDecodeError when reading files with non-ASCII characters
+                    import platform
+                    if platform.system() == 'Windows':
+                        with open(corpus_path, 'r', encoding='utf-8') as file:
+                            corpus = file.read()
+                    else:
+                        # Use default encoding on other systems
+                        with open(corpus_path, 'r') as file:
+                            corpus = file.read()
+                            
+                    current_documents = splitter.split_text(corpus)
+                    current_metadatas = []
+                    for document in current_documents:
+                        try:
+                            _, start_index, end_index = rigorous_document_search(corpus, document)
+                        except:
+                            print(f"Error in finding {document} in {corpus_id}")
+                            raise Exception(f"Error in finding {document} in {corpus_id}")
+                        current_metadatas.append({"start_index": start_index, "end_index": end_index, "corpus_id": corpus_id})
+                    documents.extend(current_documents)
+                    metadatas.extend(current_metadatas)
+
                 except KeyError:
                     print(f"Error: Path '{standardized_corpus_id}' not found in corpora_id_paths.")
                     # 你可以選擇在這裡拋出一個更清晰的錯誤，或者跳過此檔案
                     continue
-    
-            # Check the operating system and use UTF-8 encoding on Windows
-            # This prevents UnicodeDecodeError when reading files with non-ASCII characters
-            import platform
-            if platform.system() == 'Windows':
-                with open(corpus_path, 'r', encoding='utf-8') as file:
-                    corpus = file.read()
-            else:
-                # Use default encoding on other systems
-                with open(corpus_path, 'r') as file:
-                    corpus = file.read()
-    
-            current_documents = splitter.split_text(corpus)
-            current_metadatas = []
-            for document in current_documents:
-                try:
-                    _, start_index, end_index = rigorous_document_search(corpus, document)
-                except:
-                    print(f"Error in finding {document} in {corpus_id}")
-                    raise Exception(f"Error in finding {document} in {corpus_id}")
-                current_metadatas.append({"start_index": start_index, "end_index": end_index, "corpus_id": corpus_id})
-            documents.extend(current_documents)
-            metadatas.extend(current_metadatas)
         return documents, metadatas
 
     def _full_precision_score(self, chunk_metadatas):
         ioc_scores = []
         recall_scores = []
-
         highlighted_chunks_count = []
-
         for index, row in self.questions_df.iterrows():
             question = row['question']
             references = row['references']
             corpus_id = row['corpus_id']
-
+            
+            # Add a check to ensure references is a list of dictionaries.
+            # This prevents the TypeError.
+            if not isinstance(references, list) or not all(isinstance(r, dict) for r in references):
+                # Handle the bad data gracefully, e.g., by skipping this row or
+                # assigning a score of 0.
+                print(f"Warning: Invalid format for references in row {index}. Skipping or assigning zero scores.")
+                ioc_scores.append(0)
+                recall_scores.append(0)
+                highlighted_chunks_count.append(0)
+                continue
+                
             ioc_score = 0
             numerator_sets = []
             denominator_chunks_sets = []
             unused_highlights = [(x['start_index'], x['end_index']) for x in references]
-
             highlighted_chunk_count = 0
-
             for metadata in chunk_metadatas:
                 chunk_start, chunk_end, chunk_corpus_id = metadata['start_index'], metadata['end_index'], metadata['corpus_id']
-
                 if chunk_corpus_id != corpus_id:
                     continue
-                
                 contains_highlight = False
-
                 for ref_obj in references:
                     reference = ref_obj['content']
                     ref_start, ref_end = int(ref_obj['start_index']), int(ref_obj['end_index'])
                     intersection = intersect_two_ranges((chunk_start, chunk_end), (ref_start, ref_end))
-                    
                     if intersection is not None:
                         contains_highlight = True
                         unused_highlights = difference(unused_highlights, intersection)
                         numerator_sets = union_ranges([intersection] + numerator_sets)
                         denominator_chunks_sets = union_ranges([(chunk_start, chunk_end)] + denominator_chunks_sets)
-            
                 if contains_highlight:
                     highlighted_chunk_count += 1
-                
             highlighted_chunks_count.append(highlighted_chunk_count)
-
-            denominator_sets = union_ranges(denominator_chunks_sets + unused_highlights)
-            
             if numerator_sets:
                 ioc_score = sum_of_ranges(numerator_sets) / sum_of_ranges(denominator_sets)
-            
             ioc_scores.append(ioc_score)
-
             recall_score = 1 - (sum_of_ranges(unused_highlights) / sum_of_ranges([(x['start_index'], x['end_index']) for x in references]))
             recall_scores.append(recall_score)
-
         return ioc_scores, highlighted_chunks_count
 
     def _scores_from_dataset_and_retrievals(self, question_metadatas, highlighted_chunks_count):
@@ -332,12 +315,29 @@ class BaseEvaluation:
         return collection
     
     def _convert_question_references_to_json(self):
+        """
+        Converts the 'references' column from JSON strings to a list of dictionaries.
+        """
         def safe_json_loads(row):
+            if pd.isna(row):  # Handle NaN values
+                return None
             try:
-                return json.loads(row)
+                # 嘗試修復轉義的雙引號問題
+                # 這個步驟假設 CSV 讀取器已經將 "" 視為 "
+                # 但如果沒有，我們需要手動處理
+                if isinstance(row, str):
+                    row = row.replace('""', '"')
+                
+                # 使用 json.loads 嘗試解析，並處理可能的解碼錯誤
+                return json.loads(row, strict=False)
+            except json.JSONDecodeError as e:
+                # For debugging, print the malformed string
+                print(f"JSONDecodeError: {e} for string: {row}")
+                return None # Return None for malformed JSON strings
             except:
-                pass
+                return None
 
+        # Call the pre-processing function and then apply the safe_json_loads
         self.questions_df['references'] = self.questions_df['references'].apply(safe_json_loads)
 
 
@@ -350,7 +350,10 @@ class BaseEvaluation:
         embedding_function: The embedding function to use for calculating the nearest neighbours during the retrieval step. If not provided, the default BGE-M3 embedding function is used.
         retrieve: The number of chunks to retrieve per question. If set to -1, the function will retrieve the minimum number of chunks that contain excerpts for a given query. This is typically around 1 to 3 but can vary by question. By setting a specific value for retrieve, this number is fixed for all queries.
         """
+
         self._load_questions_df()
+        self._convert_question_references_to_json() 
+
         if embedding_function is None:
             embedding_function = get_bge_m3_embedding_function()
 
