@@ -7,6 +7,10 @@ import torch
 from chromadb.utils import embedding_functions
 import tiktoken
 from transformers import AutoTokenizer
+from sentence_transformers import SentenceTransformer
+from typing import Callable
+from tqdm import tqdm
+
 
 def find_query_despite_whitespace(document, query):
 
@@ -71,12 +75,32 @@ def rigorous_document_search(document: str, target: str):
     return reference, start_index, end_index
 
 def get_bge_m3_embedding_function():
-    embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="BAAI/bge-m3",
-        # Use a GPU if available for faster embedding generation
-        device='cuda:0' if torch.cuda.is_available() else 'cpu' 
-    )
-    return embedding_function
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"正在載入 BGE-M3 模型到裝置: {device}")
+    
+    # 使用 SentenceTransformer 類別直接載入模型
+    # 這可以讓您更好地控制模型，並確保它被明確地載入到 GPU
+    model = SentenceTransformer("BAAI/bge-m3", device=device)
+    
+    # 創建一個自訂的嵌入函式，以便在處理時可以加入進度條
+    class CustomEmbeddingFunction(embedding_functions.EmbeddingFunction):
+        def __call__(self, texts: embedding_functions.Documents) -> embedding_functions.Embeddings:
+            # 根據您的 GPU VRAM 大小，嘗試不同的 batch_size
+            # 如果您的 4070 Ti SUPER 顯存充足 (16GB)，可以嘗試更大的值
+            EMBEDDING_BATCH_SIZE = 16384
+
+            # 使用一個進度條來追蹤 embedding 的進度
+            # 將輸入的 texts 分成批次
+            text_batches = [texts[i:i + EMBEDDING_BATCH_SIZE] for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)]
+
+            all_embeddings = []
+            for batch in tqdm(text_batches, desc="生成嵌入向量中"):
+                embeddings = model.encode(batch, convert_to_numpy=False)
+                all_embeddings.extend(embeddings)
+
+            return [emb.tolist() for emb in all_embeddings]
+            
+    return CustomEmbeddingFunction()
 
 # Count the number of tokens in each page_content
 def bge_m3_token_count(text: str) -> int:

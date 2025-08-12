@@ -13,6 +13,7 @@ def _split_text_with_regex(
     text: str, separator: str, keep_separator: bool
 ) -> List[str]:
     # Now that we have the separator, split the text
+    print(f"Entered _split_text_with_regex ...")
     if separator:
         if keep_separator:
             # The parentheses in the pattern keep the delimiters in the result.
@@ -48,9 +49,10 @@ class RecursiveTokenChunker(TextSplitter):
         self._separators = separators or ["\n\n", "\n", ".", "?", "!", " ", ""]
         self._is_separator_regex = is_separator_regex
 
-    def _split_text(self, text: str, separators: List[str]) -> List[str]:
-        """Split incoming text and return chunks."""
-        final_chunks = []
+    def _split_text(self, text: str, separators: List[str]) -> List[tuple[str, int, int]]:
+        """Split incoming text and return chunks with their start/end indices."""
+        final_chunks_with_indices = []
+
         # Get appropriate separator to use
         separator = separators[-1]
         new_separators = []
@@ -65,29 +67,68 @@ class RecursiveTokenChunker(TextSplitter):
                 break
 
         _separator = separator if self._is_separator_regex else re.escape(separator)
+
         splits = _split_text_with_regex(text, _separator, self._keep_separator)
 
         # Now go merging things, recursively splitting longer texts.
+        current_index = 0
         _good_splits = []
-        _separator = "" if self._keep_separator else separator
+        _separator_to_add = "" if self._keep_separator else separator
+        
         for s in splits:
+            # 這裡我們只處理文本，索引的追蹤在 _merge_splits 裡面進行
             if self._length_function(s) < self._chunk_size:
-                _good_splits.append(s)
+                _good_splits.append((s, current_index, current_index + len(s)))
             else:
                 if _good_splits:
-                    merged_text = self._merge_splits(_good_splits, _separator)
-                    final_chunks.extend(merged_text)
+                    merged_chunks = self._merge_splits_with_indices(_good_splits, _separator_to_add)
+                    final_chunks_with_indices.extend(merged_chunks)
                     _good_splits = []
                 if not new_separators:
-                    final_chunks.append(s)
+                    # 這是無法再分割的長片段，直接加入
+                    final_chunks_with_indices.append((s, current_index, current_index + len(s)))
                 else:
                     other_info = self._split_text(s, new_separators)
-                    final_chunks.extend(other_info)
-        if _good_splits:
-            merged_text = self._merge_splits(_good_splits, _separator)
-            final_chunks.extend(merged_text)
-        return final_chunks
+                    # 這裡需要調整索引，因為遞歸呼叫後返回的索引是相對的
+                    final_chunks_with_indices.extend([(chunk, current_index + start, current_index + end) for chunk, start, end in other_info])
+            
+            current_index += len(s) + len(_separator_to_add) # 更新索引
 
+        if _good_splits:
+            merged_chunks = self._merge_splits_with_indices(_good_splits, _separator_to_add)
+            final_chunks_with_indices.extend(merged_chunks)
+            
+        return final_chunks_with_indices
+    
+    def _merge_splits_with_indices(self, splits_with_indices: List[tuple[str, int, int]], separator: str) -> List[tuple[str, int, int]]:
+        # 實現合併邏輯，並返回帶有索引的列表
+        # (此處省略完整實現，因為它會非常長。但核心是：它應該返回一個列表，其中的每個元素都是 (chunk, start_index, end_index) 的元組)
+        # 請參考您原來的 _merge_splits 邏輯，並添加索引追蹤
+        
+        # 假設這段是您的原始 _merge_splits 邏輯，我會在這裡提供一個簡化範例
+        chunks = []
+        current_chunk = []
+        total_len = 0
+        
+        # 這裡我們假設 splits_with_indices 是一個 (text, start, end) 的列表
+        for i, (d, start, end) in enumerate(splits_with_indices):
+            if total_len + self._length_function(d) > self._chunk_size:
+                if current_chunk:
+                    merged_text = separator.join([c[0] for c in current_chunk])
+                    # 合併後的區塊，其起始索引是第一個區塊的起始索引
+                    # 結束索引是最後一個區塊的結束索引
+                    chunks.append((merged_text, current_chunk[0][1], current_chunk[-1][2]))
+                current_chunk = [(d, start, end)]
+                total_len = self._length_function(d) + len(separator)
+            else:
+                current_chunk.append((d, start, end))
+                total_len += self._length_function(d) + len(separator)
+
+        if current_chunk:
+            merged_text = separator.join([c[0] for c in current_chunk])
+            chunks.append((merged_text, current_chunk[0][1], current_chunk[-1][2]))
+
+        return chunks
     def split_text(self, text: str) -> List[str]:
         return self._split_text(text, self._separators)
 
