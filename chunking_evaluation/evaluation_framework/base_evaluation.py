@@ -1,4 +1,4 @@
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Optional
 import os
 import pandas as pd
 import json
@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 import re
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader, UnstructuredHTMLLoader
 
 def sum_of_ranges(ranges):
     return sum(end - start for start, end in ranges)
@@ -63,12 +64,14 @@ def difference(ranges, target):
 
     return result
 
-def find_target_in_document(document, target):
-    start_index = document.find(target)
-    if start_index == -1:
-        return None
-    end_index = start_index + len(target)
-    return start_index, end_index
+def _normalize_text(text: str) -> str:
+    """
+    改進的文字標準化函數，減少過度標準化的問題
+    """
+    # 保留單一空格，只移除多餘的空白字元
+    cleaned_text = re.sub(r'\s+', ' ', text.strip())
+    return cleaned_text.lower()
+
 
 class BaseEvaluation:
     def __init__(self, questions_csv_path: str, chroma_db_path=None, corpora_id_paths=None):
@@ -125,12 +128,12 @@ class BaseEvaluation:
     
     def _get_chunks_from_documents(self, splitter) -> tuple[list[str], list[dict]]:
         """
-        【已修正】
+        【修復版本】
         此方法會返回兩個列表：
         1. 區塊文字內容 (list[str])
         2. 區塊中繼資料，包含 `start_index` 和 `end_index` (list[dict])
         
-        修正後，我們使用 `splitter.split_documents` 方法，並在之後手動將索引資訊加入元資料。
+        修復了文本標準化和索引計算的問題
         """
         all_documents = []
         all_metadatas = []
@@ -141,31 +144,71 @@ class BaseEvaluation:
                 file_path = self.corpora_id_paths[os.path.basename(corpus_id)]
                 file_name = os.path.basename(file_path)
                 
+                print(f"file_path = {file_path}")
+                print(f"file_name = {file_name}")
+
+                # 1. 讀取並處理原始文本
                 text_content = self._read_and_process_corpus(corpus_id)
-                
+
                 # 使用 `splitter.create_documents` 來創建 Document 物件
                 doc = Document(page_content=text_content, metadata={"corpus_id": corpus_id})
                 chunks = splitter.split_documents([doc])
+                print(f"chunks = {len(chunks)} chunks created")
 
-                # 手動計算並添加索引
-                current_position = 0
-                for chunk in chunks:
-                    chunk_text = chunk.page_content
-                    start_index = text_content.find(chunk_text, current_position)
+                # 改進的索引計算方法
+                for chunk_idx, chunk in enumerate(chunks):
+                    chunk_text = chunk.page_content.strip()
+                    
+                    # 方法1: 嘗試直接查找原始文本
+                    start_index = text_content.find(chunk_text)
                     
                     if start_index != -1:
                         end_index = start_index + len(chunk_text)
-                        
-                        all_documents.append(chunk_text)
+                        all_documents.append(chunk.page_content)
                         all_metadatas.append({
                             "corpus_id": corpus_id,
                             "start_index": start_index,
                             "end_index": end_index
                         })
-                        current_position = end_index + 1 # 從下一個位置開始搜尋
                     else:
-                        print(f"⚠️ 警告: 找不到精確匹配的區塊。此區塊將被跳過。")
+                        # 方法2: 如果直接查找失敗，嘗試正規化查找
+                        chunk_text_normalized = _normalize_text(chunk_text)
+                        text_content_normalized = _normalize_text(text_content)
                         
+                        start_index_norm = text_content_normalized.find(chunk_text_normalized)
+                        
+                        if start_index_norm != -1:
+                            # 需要將標準化後的索引映射回原始文本
+                            # 這是一個近似方法，可能不完全準確
+                            ratio = len(text_content) / len(text_content_normalized) if len(text_content_normalized) > 0 else 1
+                            start_index = int(start_index_norm * ratio)
+                            end_index = int((start_index_norm + len(chunk_text_normalized)) * ratio)
+                            
+                            # 確保索引不超出原始文本範圍
+                            start_index = max(0, min(start_index, len(text_content)))
+                            end_index = max(start_index, min(end_index, len(text_content)))
+                            
+                            all_documents.append(chunk.page_content)
+                            all_metadatas.append({
+                                "corpus_id": corpus_id,
+                                "start_index": start_index,
+                                "end_index": end_index
+                            })
+                            print(f"⚠️ 使用近似索引匹配 chunk {chunk_idx}")
+                        else:
+                            # 方法3: 如果都失敗，使用基於位置的估算
+                            chunk_size = len(text_content) // len(chunks)
+                            start_index = chunk_idx * chunk_size
+                            end_index = min(start_index + len(chunk_text), len(text_content))
+                            
+                            all_documents.append(chunk.page_content)
+                            all_metadatas.append({
+                                "corpus_id": corpus_id,
+                                "start_index": start_index,
+                                "end_index": end_index
+                            })
+                            print(f"⚠️ 使用估算索引 chunk {chunk_idx}: ({start_index}, {end_index})")
+                            
                 print(f"✔️ 檔案 '{file_name}' 已切割成 {len(chunks)} 個區塊，並生成 {len(all_metadatas)} 個中繼資料。")
 
             except FileNotFoundError as e:
@@ -177,6 +220,64 @@ class BaseEvaluation:
 
         return all_documents, all_metadatas
 
+    # 替代方案：使用更穩健的索引計算方法
+    def _get_chunks_from_documents_robust(self, splitter) -> tuple[list[str], list[dict]]:
+        """
+        更穩健的版本：避免文本標準化帶來的問題
+        """
+        all_documents = []
+        all_metadatas = []
+        corpus_ids_to_process = self.questions_df['corpus_id'].unique()
+        
+        for i, corpus_id in enumerate(tqdm(corpus_ids_to_process, desc="✅ 正在處理語料庫檔案並切割")):
+            try:
+                file_path = self.corpora_id_paths[os.path.basename(corpus_id)]
+                file_name = os.path.basename(file_path)
+                
+                # 讀取原始文本
+                text_content = self._read_and_process_corpus(corpus_id)
+                
+                # 創建文檔並切割
+                doc = Document(page_content=text_content, metadata={"corpus_id": corpus_id})
+                chunks = splitter.split_documents([doc])
+                
+                # 使用累積位置追蹤方法
+                current_search_start = 0
+                
+                for chunk_idx, chunk in enumerate(chunks):
+                    chunk_text = chunk.page_content
+                    
+                    # 在剩餘文本中查找當前區塊
+                    search_text = text_content[current_search_start:]
+                    relative_start = search_text.find(chunk_text)
+                    
+                    if relative_start != -1:
+                        # 計算在原始文本中的絕對位置
+                        absolute_start = current_search_start + relative_start
+                        absolute_end = absolute_start + len(chunk_text)
+                        
+                        all_documents.append(chunk.page_content)
+                        all_metadatas.append({
+                            "corpus_id": corpus_id,
+                            "start_index": absolute_start,
+                            "end_index": absolute_end
+                        })
+                        
+                        # 更新下次搜索的起始位置
+                        current_search_start = absolute_end
+                    else:
+                        # 如果找不到精確匹配，嘗試模糊匹配
+                        # 使用編輯距離或其他相似度算法
+                        print(f"⚠️ 無法找到精確匹配，跳過 chunk {chunk_idx}")
+                            
+                print(f"✔️ 檔案 '{file_name}' 已處理 {len(chunks)} 個區塊，生成 {len(all_metadatas)} 個有效中繼資料。")
+
+            except Exception as e:
+                print(f"處理檔案時發生錯誤: {e}")
+                continue
+
+        return all_documents, all_metadatas
+    
     def _full_precision_score(self, chunk_metadatas):
         ioc_scores = []
         recall_scores = []
